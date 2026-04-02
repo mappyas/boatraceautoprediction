@@ -51,10 +51,10 @@ def predict_race(entry_df: pd.DataFrame, model_meta: dict = None) -> pd.DataFram
 
     X = entry_df[feature_cols].copy()
     for col in X.columns:
-        if X[col].dtype in [float, np.float64]:
-            X[col] = X[col].fillna(X[col].median() if not X[col].isna().all() else 0)
-        else:
-            X[col] = X[col].fillna(0)
+        X[col] = pd.to_numeric(X[col], errors="coerce")
+    for col in X.columns:
+        median = X[col].median()
+        X[col] = X[col].fillna(median if pd.notna(median) else 0)
 
     # 予測 → shape: (n_boats, 6) = 各艇の各着順の確率
     probs = model.predict(X)  # multiclass: P(着順=k) for k=0..5

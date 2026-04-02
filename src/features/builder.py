@@ -120,7 +120,9 @@ def _add_grade_numeric(df: pd.DataFrame) -> pd.DataFrame:
 def _add_course_features(df: pd.DataFrame) -> pd.DataFrame:
     """コース関連特徴量"""
     df = df.copy()
-    df["course"] = df["course"].fillna(df["boat_number"])
+    df["course"] = pd.to_numeric(df["course"], errors="coerce").fillna(
+        pd.to_numeric(df["boat_number"], errors="coerce")
+    ).astype(float)
     df["is_1course"] = (df["course"] == 1).astype(int)
     df["is_inner"] = (df["course"] <= 3).astype(int)
     return df
@@ -148,7 +150,7 @@ def _add_rolling_stats(df: pd.DataFrame, session: Session) -> pd.DataFrame:
 
     rolling_records = []
     for racer_id, group in hist.groupby("racer_id"):
-        group = group.sort_values("race_date")
+        group = group.sort_values("race_date").reset_index(drop=True)
         arrivals = group["arrival"].tolist()
         sts = group["start_timing"].tolist()
         for idx in range(len(arrivals)):
@@ -157,6 +159,7 @@ def _add_rolling_stats(df: pd.DataFrame, session: Session) -> pd.DataFrame:
             rolling_records.append({
                 "racer_id": racer_id,
                 "race_date": group["race_date"].iloc[idx].date(),
+                "_row_idx": idx,
                 "recent_avg_arrival": np.mean(past) if past else 3.5,
                 "recent_win_count": sum(1 for a in past if a == 1),
                 "recent_avg_st": np.mean(past_st) if past_st else 0.18,
@@ -169,10 +172,13 @@ def _add_rolling_stats(df: pd.DataFrame, session: Session) -> pd.DataFrame:
         return df
 
     rolling_df = pd.DataFrame(rolling_records)
+    # 同日複数レースによる重複を避けるため racer_id+race_date で集約（先頭値を使用）
+    rolling_df = rolling_df.groupby(["racer_id", "race_date"], as_index=False).first()
     rolling_df["race_date"] = pd.to_datetime(rolling_df["race_date"])
     df["race_date"] = pd.to_datetime(df["race_date"])
 
-    df = df.merge(rolling_df, on=["racer_id", "race_date"], how="left")
+    df = df.merge(rolling_df[["racer_id", "race_date", "recent_avg_arrival", "recent_win_count", "recent_avg_st"]],
+                  on=["racer_id", "race_date"], how="left")
     df["recent_avg_arrival"] = df["recent_avg_arrival"].fillna(3.5)
     df["recent_win_count"] = df["recent_win_count"].fillna(0)
     df["recent_avg_st"] = df["recent_avg_st"].fillna(0.18)
@@ -202,12 +208,15 @@ def _add_odds_features(df: pd.DataFrame, session: Session) -> pd.DataFrame:
 def _add_exhibition_features(df: pd.DataFrame) -> pd.DataFrame:
     """展示タイム関連の特徴量"""
     df = df.copy()
-    df["exhibition_time"] = df["exhibition_time"].fillna(df["exhibition_time"].median())
+    df["exhibition_time"] = pd.to_numeric(df["exhibition_time"], errors="coerce")
+    df["start_exhibition_time"] = pd.to_numeric(df["start_exhibition_time"], errors="coerce")
+
+    median_ex = df["exhibition_time"].median()
+    df["exhibition_time"] = df["exhibition_time"].fillna(median_ex if pd.notna(median_ex) else 6.7)
 
     # レース内での展示タイム順位（速い=1）
     df["exhibition_rank"] = df.groupby("race_id")["exhibition_time"].rank(ascending=True)
 
-    # スタート展示タイム
     df["start_exhibition_time"] = df["start_exhibition_time"].fillna(0.18)
 
     return df
