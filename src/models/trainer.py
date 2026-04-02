@@ -55,12 +55,12 @@ def prepare_data(df: pd.DataFrame):
     df_clean = df_clean[df_clean[TARGET_COL].between(1, 6)]
 
     X = df_clean[available_cols].copy()
-    # NaN補完
+    # object型を数値に変換してからNaN補完
     for col in X.columns:
-        if X[col].dtype in [float, np.float64]:
-            X[col] = X[col].fillna(X[col].median())
-        else:
-            X[col] = X[col].fillna(0)
+        X[col] = pd.to_numeric(X[col], errors="coerce")
+    for col in X.columns:
+        median = X[col].median()
+        X[col] = X[col].fillna(median if pd.notna(median) else 0)
 
     # 着順を0始まりのラベルに変換（LightGBMのmulticlassは0-indexed）
     y = df_clean[TARGET_COL].astype(int) - 1  # 1着→0, 2着→1, ...

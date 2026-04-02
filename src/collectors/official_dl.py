@@ -2,255 +2,179 @@
 ボートレース公式ダウンロードデータのパーサ
 https://www.boatrace.jp/owpc/pc/extra/data/download.html
 
-ファイル形式：
-- K{YYYYMMDD}.TXT  → 番組表（出走表）
-- B{YYYYMMDD}.TXT  → 競走成績
+対応ファイル形式:
+  fan*.txt  ... モーターボートファン手帳（選手マスタ・期別成績）
+  K*.txt    ... 番組表（出走表）
+  B*.txt    ... 競走成績
+
+ファン手帳 固定幅フォーマット（バイト位置・1始まり）:
+  1- 4: 登番(4)
+  5-20: 名前漢字(16) ※全角含むためバイト数に注意
+ 21-35: 名前カナ(15)
+ 36-39: 支部(4)
+ 40-41: 級(2)
+ 42   : 年号(1) S=昭和 H=平成 R=令和
+ 43-48: 生年月日(6) YYMMDD
+ 49   : 性別(1) 1=男 2=女
+ 50-51: 年齢(2)
+ 52-54: 身長(3)
+ 55-56: 体重(2)  ※kg整数値
+ 57-58: 血液型(2)
+ 59-62: 勝率(4)  ※100倍整数 例:0587→5.87
+ 63-66: 複勝率(4) ※100倍整数 例:0333→33.3
+ 67-69: 1着回数(3)
+ 70-72: 2着回数(3)
+ 73-75: 出走回数(3)
+ 76-77: 優出回数(2)
+ 78-79: 優勝回数(2)
+ 80-82: 平均ST(3)  ※1000倍整数 例:017→0.17
 """
 
-import re
-from datetime import date
 from pathlib import Path
 from typing import Optional
 from loguru import logger
 
 
-# 競艇場コードマッピング（名前→2桁コード）
-STADIUM_NAME_TO_CODE = {
-    "桐生": "01", "戸田": "02", "江戸川": "03", "平和島": "04",
-    "多摩川": "05", "浜名湖": "06", "蒲郡": "07", "常滑": "08",
-    "津": "09", "三国": "10", "びわこ": "11", "住之江": "12",
-    "尼崎": "13", "鳴門": "14", "丸亀": "15", "児島": "16",
-    "宮島": "17", "徳山": "18", "下関": "19", "若松": "20",
-    "芦屋": "21", "福岡": "22", "唐津": "23", "大村": "24",
-}
-
-WEATHER_MAP = {
-    "1": "晴", "2": "曇", "3": "雨", "4": "霧", "5": "雪",
-}
-
-WIND_DIR_MAP = {
-    "1": "北", "2": "北東", "3": "東", "4": "南東",
-    "5": "南", "6": "南西", "7": "西", "8": "北西",
-}
-
-GRADE_MAP = {
-    "A1": "A1", "A2": "A2", "B1": "B1", "B2": "B2",
-    "1": "A1", "2": "A2", "3": "B1", "4": "B2",
-}
+def _get_bytes(data: bytes, start: int, length: int) -> bytes:
+    """1-indexed バイト位置からスライス"""
+    return data[start - 1: start - 1 + length]
 
 
-def _safe_float(s: str) -> Optional[float]:
-    s = s.strip()
-    if not s or s in (".", "―", "-", "F", "L", "S", "0.00"):
-        return None
-    try:
-        return float(s)
-    except ValueError:
-        return None
+def _decode(data: bytes, start: int, length: int) -> str:
+    return _get_bytes(data, start, length).decode("cp932", errors="replace").strip()
 
 
-def _safe_int(s: str) -> Optional[int]:
-    s = s.strip()
-    if not s or s in (".", "―", "-"):
-        return None
+def _int(data: bytes, start: int, length: int) -> Optional[int]:
+    s = _decode(data, start, length)
     try:
         return int(s)
     except ValueError:
         return None
 
 
-def parse_program_file(filepath: str | Path) -> list[dict]:
+def _float_div(data: bytes, start: int, length: int, divisor: float) -> Optional[float]:
+    v = _int(data, start, length)
+    return round(v / divisor, 4) if v is not None else None
+
+
+def parse_fan_file(filepath: str | Path) -> list[dict]:
     """
-    番組表ファイル (K{YYYYMMDD}.TXT) を解析し、レース・選手エントリ情報を返す。
-    """
-    filepath = Path(filepath)
-    records = []
+    ファン手帳ファイル (fan*.txt) を解析し、選手情報リストを返す。
 
-    try:
-        with open(filepath, encoding="cp932", errors="replace") as f:
-            lines = f.readlines()
-    except OSError as e:
-        logger.error(f"Failed to open {filepath}: {e}")
-        return []
-
-    i = 0
-    current_race = None
-
-    while i < len(lines):
-        line = lines[i].rstrip("\n")
-
-        # レースヘッダ行（場コード、日付、レース番号が含まれる行を検出）
-        if line.startswith("BBGN"):
-            # 新しいレースブロック開始
-            current_race = None
-            i += 1
-            continue
-
-        # 場・日付・レース番ヘッダを解析（固定幅フォーマット）
-        # 先頭に 場コード2桁 がある行
-        m = re.match(r"^(\d{2})(\d{8})(\d{2})", line)
-        if m and current_race is None:
-            stadium_code = m.group(1)
-            date_str = m.group(2)
-            race_number = int(m.group(3))
-            race_date = date(int(date_str[:4]), int(date_str[4:6]), int(date_str[6:8]))
-            race_id = f"{stadium_code}{date_str}{str(race_number).zfill(2)}"
-            current_race = {
-                "race_id": race_id,
-                "stadium_code": stadium_code,
-                "race_date": race_date,
-                "race_number": race_number,
-                "entries": [],
-            }
-            records.append(current_race)
-            i += 1
-            continue
-
-        # 選手エントリ行（艇番1〜6）
-        if current_race is not None:
-            m_entry = re.match(r"^([1-6])\s+(\d{4})\s+(\S+)", line)
-            if m_entry:
-                boat_number = int(m_entry.group(1))
-                racer_id = m_entry.group(2)
-                racer_name = m_entry.group(3)
-                # 残りフィールドは位置依存で取得（簡易実装）
-                parts = line.split()
-                entry = {
-                    "boat_number": boat_number,
-                    "racer_id": racer_id,
-                    "racer_name": racer_name,
-                    "motor_number": _safe_int(parts[6]) if len(parts) > 6 else None,
-                    "motor_rate": _safe_float(parts[7]) if len(parts) > 7 else None,
-                    "boat_number_motor": _safe_int(parts[8]) if len(parts) > 8 else None,
-                    "boat_rate": _safe_float(parts[9]) if len(parts) > 9 else None,
-                }
-                current_race["entries"].append(entry)
-
-        i += 1
-
-    logger.info(f"Parsed {len(records)} races from {filepath}")
-    return records
-
-
-def parse_result_file(filepath: str | Path) -> list[dict]:
-    """
-    競走成績ファイル (B{YYYYMMDD}.TXT) を解析し、レース結果を返す。
+    Returns:
+        list of {
+            racer_id, name, branch, grade,
+            weight, height, national_win_rate,
+            national_place2_rate, national_1st_count,
+            national_2nd_count, national_race_count,
+            fly_count(優出回数), late_count(優勝回数), avg_st
+        }
     """
     filepath = Path(filepath)
     records = []
 
     try:
-        with open(filepath, encoding="cp932", errors="replace") as f:
-            content = f.read()
+        with open(filepath, "rb") as f:
+            raw_lines = f.readlines()
     except OSError as e:
         logger.error(f"Failed to open {filepath}: {e}")
         return []
 
-    # レースブロックをBBGNで分割
-    blocks = re.split(r"BBGN", content)
-
-    for block in blocks:
-        if not block.strip():
-            continue
-
-        lines = block.strip().split("\n")
-        if len(lines) < 5:
+    for i, raw in enumerate(raw_lines):
+        raw = raw.rstrip(b"\r\n")
+        if len(raw) < 82:
             continue
 
         try:
-            # 1行目：場コード・日付・レース番
-            header = lines[0].strip()
-            m = re.match(r"(\d{2})(\d{8})(\d{2})", header)
-            if not m:
-                continue
+            racer_id = _decode(raw, 1, 4)
+            if not racer_id.isdigit():
+                continue  # ヘッダ行等をスキップ
 
-            stadium_code = m.group(1)
-            date_str = m.group(2)
-            race_number = int(m.group(3))
-            race_date = date(int(date_str[:4]), int(date_str[4:6]), int(date_str[6:8]))
-            race_id = f"{stadium_code}{date_str}{str(race_number).zfill(2)}"
+            name = _decode(raw, 5, 16)
+            branch = _decode(raw, 36, 4)
+            grade = _decode(raw, 40, 2)
+            age = _int(raw, 50, 2)
+            height = _int(raw, 52, 3)
+            weight = _int(raw, 55, 2)
+            # 勝率・複勝率: 100倍整数
+            win_rate = _float_div(raw, 59, 4, 100)
+            place2_rate = _float_div(raw, 63, 4, 100)
+            count_1st = _int(raw, 67, 3)
+            count_2nd = _int(raw, 70, 3)
+            race_count = _int(raw, 73, 3)
+            yushutsu = _int(raw, 76, 2)   # 優出回数
+            yusho = _int(raw, 78, 2)      # 優勝回数
+            avg_st = _float_div(raw, 80, 3, 100)
 
-            rec = {
-                "race_id": race_id,
-                "stadium_code": stadium_code,
-                "race_date": race_date,
-                "race_number": race_number,
-                "weather": None,
-                "temperature": None,
-                "water_temperature": None,
-                "wind_speed": None,
-                "wind_direction": None,
-                "wave_height": None,
-                "results": [],
-                "payouts": [],
-            }
+            records.append({
+                "racer_id": racer_id,
+                "name": name,
+                "branch": branch,
+                "grade": grade if grade in ("A1", "A2", "B1", "B2") else "B1",
+                "height": height,
+                "weight": weight,
+                "national_win_rate": win_rate,
+                "national_place2_rate": place2_rate,
+                "national_place3_rate": None,
+                "national_1st_count": count_1st,
+                "national_2nd_count": count_2nd,
+                "national_race_count": race_count,
+                "fly_count": yushutsu or 0,
+                "late_count": yusho or 0,
+                "avg_st": avg_st,
+            })
 
-            # 天候・気温・水温・風向風速・波高を探す
-            for line in lines:
-                m_env = re.search(
-                    r"天候(\d)\s*気温([\d.]+)\s*水温([\d.]+)\s*風(\d+)\s*([\d.]+)\s*波(\d+)",
-                    line
-                )
-                if m_env:
-                    rec["weather"] = WEATHER_MAP.get(m_env.group(1), m_env.group(1))
-                    rec["temperature"] = _safe_float(m_env.group(2))
-                    rec["water_temperature"] = _safe_float(m_env.group(3))
-                    rec["wind_direction"] = _safe_int(m_env.group(4))
-                    rec["wind_speed"] = _safe_float(m_env.group(5))
-                    rec["wave_height"] = _safe_int(m_env.group(6))
-                    break
-
-            # 着順・STタイム
-            for line in lines:
-                m_result = re.match(
-                    r"\s*([1-6])\s+([1-6])\s+(\d{4})\s+(\S+)\s+([-F\d.]+)\s+([\d:'.]+)?",
-                    line
-                )
-                if m_result:
-                    arrival = int(m_result.group(1))
-                    boat_number = int(m_result.group(2))
-                    st_raw = m_result.group(5)
-                    # STの正規化
-                    if st_raw.startswith("F"):
-                        st = -float(st_raw[1:]) if len(st_raw) > 1 else -0.001
-                    elif st_raw.startswith("L"):
-                        st = None
-                    else:
-                        st = _safe_float(st_raw)
-
-                    rec["results"].append({
-                        "boat_number": boat_number,
-                        "arrival": arrival,
-                        "start_timing": st,
-                        "race_time": None,
-                        "winning_trick": None,
-                    })
-
-            # 払戻
-            payout_patterns = [
-                ("trifecta", r"3連単\s+([\d-]+)\s+([\d,]+)"),
-                ("trio", r"3連複\s+([\d-]+)\s+([\d,]+)"),
-                ("exacta", r"2連単\s+([\d-]+)\s+([\d,]+)"),
-                ("quinella", r"2連複\s+([\d-]+)\s+([\d,]+)"),
-                ("win", r"単勝\s+(\d+)\s+([\d,]+)"),
-            ]
-            for line in lines:
-                for bet_type, pattern in payout_patterns:
-                    m_pay = re.search(pattern, line)
-                    if m_pay:
-                        combo = m_pay.group(1).replace("=", "-")
-                        payout = int(m_pay.group(2).replace(",", ""))
-                        rec["payouts"].append({
-                            "bet_type": bet_type,
-                            "combination": combo,
-                            "payout": payout,
-                        })
-
-            records.append(rec)
-
-        except (ValueError, IndexError) as e:
-            logger.warning(f"Failed to parse block: {e}")
+        except Exception as e:
+            logger.debug(f"Skip line {i+1}: {e}")
             continue
 
-    logger.info(f"Parsed {len(records)} results from {filepath}")
+    logger.info(f"Parsed {len(records)} racers from {filepath.name}")
     return records
+
+
+def ingest_fan_files(raw_dir: str = "data/raw", db_path: str = "data/db/boatrace.db"):
+    """
+    data/raw/ 以下の fan*.txt を全て読み込み、racersテーブルに投入する。
+    同一登番は最新期のデータで上書きする。
+    """
+    from src.db.models import Racer, init_db
+    from src.db.repository import get_session_factory, session_scope, RacerRepository
+
+    raw_dir = Path(raw_dir)
+    fan_files = sorted(raw_dir.glob("fan*.txt"))
+
+    if not fan_files:
+        logger.warning(f"No fan*.txt files found in {raw_dir}")
+        return 0
+
+    logger.info(f"Found {len(fan_files)} fan files: {[f.name for f in fan_files]}")
+
+    init_db(db_path)
+    session_factory = get_session_factory(db_path)
+
+    total = 0
+    for fan_file in fan_files:
+        records = parse_fan_file(fan_file)
+
+        with session_scope(session_factory) as session:
+            repo = RacerRepository(session)
+            for rec in records:
+                racer = Racer(
+                    racer_id=rec["racer_id"],
+                    name=rec["name"],
+                    branch=rec["branch"],
+                    grade=rec["grade"],
+                    weight=float(rec["weight"]) if rec["weight"] else None,
+                    national_win_rate=rec["national_win_rate"],
+                    national_place2_rate=rec["national_place2_rate"],
+                    national_place3_rate=rec["national_place3_rate"],
+                    fly_count=rec["fly_count"],
+                    late_count=rec["late_count"],
+                )
+                repo.upsert(racer)
+            total += len(records)
+
+        logger.info(f"Ingested {len(records)} racers from {fan_file.name}")
+
+    logger.info(f"Total racers ingested: {total}")
+    return total
