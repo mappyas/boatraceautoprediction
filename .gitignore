@@ -1,0 +1,25 @@
+# 環境変数
+.env
+
+# データ・モデル（大容量ファイル）
+data/db/
+data/models/
+data/raw/
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+.venv/
+venv/
+*.egg-info/
+
+# ログ
+logs/
+
+# Streamlit
+.streamlit/
+
+# IDE
+.vscode/
+.idea/
